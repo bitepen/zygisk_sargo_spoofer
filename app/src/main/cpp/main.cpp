@@ -5,16 +5,52 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#include <sys/system_properties.h>
 #include "zygisk.hpp"
 
 #define LOG_TAG "SargoSpoofer"
-// 强行提升日志级别到 INFO 和 ERROR，击穿安卓 16 的屏蔽！
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
 using zygisk::Api;
 using zygisk::AppSpecializeArgs;
 using zygisk::Option;
+
+// ==========================================================
+// 黑科技：截胡底层 SystemProperties，坚定地告诉它我们是 Pixel 3a
+// ==========================================================
+static jstring my_native_get(JNIEnv *env, jclass clazz, jstring key, jstring def) {
+    if (!key) return def;
+    const char *k = env->GetStringUTFChars(key, nullptr);
+    jstring ret = nullptr;
+    
+    // 全面伪装成 Pixel 3a (sargo)
+    if (strcmp(k, "ro.product.model") == 0 || strcmp(k, "ro.product.vendor.model") == 0) {
+        ret = env->NewStringUTF("Pixel 3a");
+    } else if (strcmp(k, "ro.product.brand") == 0 || strcmp(k, "ro.product.vendor.brand") == 0) {
+        ret = env->NewStringUTF("google");
+    } else if (strcmp(k, "ro.product.manufacturer") == 0 || strcmp(k, "ro.product.vendor.manufacturer") == 0) {
+        ret = env->NewStringUTF("Google");
+    } else if (strcmp(k, "ro.product.device") == 0 || strcmp(k, "ro.product.vendor.device") == 0) {
+        ret = env->NewStringUTF("sargo");
+    } else if (strcmp(k, "ro.product.name") == 0 || strcmp(k, "ro.product.vendor.name") == 0) {
+        ret = env->NewStringUTF("sargo");
+    } else {
+        // 无关属性老老实实去系统里查
+        char value[PROP_VALUE_MAX];
+        if (__system_property_get(k, value) > 0) {
+            ret = env->NewStringUTF(value);
+        }
+    }
+    
+    env->ReleaseStringUTFChars(key, k);
+    return ret ? ret : def;
+}
+
+static jstring my_native_get1(JNIEnv *env, jclass clazz, jstring key) {
+    return my_native_get(env, clazz, key, nullptr);
+}
+// ==========================================================
 
 class SargoSpoofer : public zygisk::ModuleBase {
 public:
@@ -28,15 +64,13 @@ public:
 
         const char *process = env->GetStringUTFChars(args->nice_name, nullptr);
         if (process) {
-            // 使用更底层的 strcmp 比较包名，防漏判
-            if (strcmp(process, "com.google.android.apps.photos") == 0) {
+            if (strstr(process, "android.apps.photos") != nullptr) {
                 is_target = true;
             }
             env->ReleaseStringUTFChars(args->nice_name, process);
         }
 
         if (is_target) {
-            LOGI("PreAppSpecialize: Photos detected! Trying to open classes.dex...");
             int dirfd = api->getModuleDir();
             if (dirfd >= 0) {
                 dex_fd = openat(dirfd, "classes.dex", O_RDONLY);
@@ -45,17 +79,11 @@ public:
                     if (fstat(dex_fd, &sb) == 0 && sb.st_size > 0) {
                         dex_size = sb.st_size;
                         api->exemptFd(dex_fd); 
-                        LOGI("PreAppSpecialize: classes.dex opened! Size: %zu bytes", dex_size);
                     } else {
                         close(dex_fd);
                         dex_fd = -1;
-                        LOGE("PreAppSpecialize: classes.dex is empty or corrupted!");
                     }
-                } else {
-                    LOGE("PreAppSpecialize: Could NOT find classes.dex! Check the ZIP file structure.");
                 }
-            } else {
-                LOGE("PreAppSpecialize: Failed to get module directory.");
             }
         } else {
             api->setOption(Option::DLCLOSE_MODULE_LIBRARY);
@@ -65,19 +93,24 @@ public:
     void postAppSpecialize(const AppSpecializeArgs *) override {
         if (!is_target) return;
         
-        LOGI("PostAppSpecialize: Process starting! Applying Build props (Door 1)...");
+        LOGI("PostAppSpecialize: Photos target confirmed. Injecting Build Props...");
         injectBuildProps(); 
+
+        LOGI("PostAppSpecialize: Hooking SystemProperties (The Ultimate Bypass)...");
+        JNINativeMethod methods[] = {
+            {"native_get", "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;", (void *)my_native_get},
+            {"native_get", "(Ljava/lang/String;)Ljava/lang/String;", (void *)my_native_get1}
+        };
+        api->hookJniNativeMethods(env, "android/os/SystemProperties", methods, 2);
         
         if (dex_fd >= 0 && dex_size > 0) {
-            LOGI("PostAppSpecialize: Mapping Dex into memory (Door 2)...");
+            LOGI("PostAppSpecialize: Mapping Dex into memory...");
             void *dex_map = mmap(nullptr, dex_size, PROT_READ, MAP_PRIVATE, dex_fd, 0);
             if (dex_map != MAP_FAILED) {
                 jobject byte_buffer = env->NewDirectByteBuffer(dex_map, dex_size);
-
                 jclass classLoaderClass = env->FindClass("java/lang/ClassLoader");
                 jmethodID getSystemClassLoader = env->GetStaticMethodID(classLoaderClass, "getSystemClassLoader", "()Ljava/lang/ClassLoader;");
                 jobject systemLoader = env->CallStaticObjectMethod(classLoaderClass, getSystemClassLoader);
-
                 jclass inMemoryDexClassLoaderClass = env->FindClass("dalvik/system/InMemoryDexClassLoader");
                 jmethodID init = env->GetMethodID(inMemoryDexClassLoaderClass, "<init>", "(Ljava/nio/ByteBuffer;Ljava/lang/ClassLoader;)V");
                 jobject dexLoader = env->NewObject(inMemoryDexClassLoaderClass, init, byte_buffer, systemLoader);
@@ -88,28 +121,20 @@ public:
 
                 if (env->ExceptionCheck()) {
                     env->ExceptionClear();
-                    LOGE("PostAppSpecialize: FAILED to load Java Hook class!");
                 } else if (hookClass) {
                     jmethodID initHook = env->GetStaticMethodID(hookClass, "init", "()V");
                     if (initHook) {
                         env->CallStaticVoidMethod(hookClass, initHook);
                         if (env->ExceptionCheck()) {
                             env->ExceptionClear();
-                            LOGE("PostAppSpecialize: Java Hook init() threw an exception!");
                         } else {
-                            LOGI("PostAppSpecialize: SUCCESS! Java Hook injected and running!");
+                            LOGI("PostAppSpecialize: Java Hook successfully executed.");
                         }
-                    } else {
-                        LOGE("PostAppSpecialize: init() method missing in Java code.");
                     }
                 }
                 env->DeleteLocalRef(className);
-            } else {
-                LOGE("PostAppSpecialize: mmap failed!");
             }
             close(dex_fd);
-        } else {
-            LOGE("PostAppSpecialize: Dex FD invalid, skipping Door 2 (Hook failed).");
         }
     }
 
@@ -132,16 +157,13 @@ private:
     void injectBuildProps() {
         jclass build_class = env->FindClass("android/os/Build");
         if (!build_class) return;
-
         setStaticString(build_class, "BRAND", "google");
         setStaticString(build_class, "MANUFACTURER", "Google");
         setStaticString(build_class, "DEVICE", "sargo");
         setStaticString(build_class, "PRODUCT", "sargo");
         setStaticString(build_class, "MODEL", "Pixel 3a");
         setStaticString(build_class, "FINGERPRINT", "google/sargo/sargo:12/SP2A.220505.002/8353555:user/release-keys");
-
         env->DeleteLocalRef(build_class);
-        LOGI("PostAppSpecialize: Build properties modified successfully.");
     }
 };
 
