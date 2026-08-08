@@ -30,17 +30,23 @@ public class SystemFeatureHook {
             // 2. 拿到系统的 PackageManager
             Log.i(TAG, "Step 2: Fetching sPackageManager...");
             Class<?> activityThreadClass = Class.forName("android.app.ActivityThread");
+            
+            // 【终极绝杀核心】：强行踹系统一脚，让它立刻把 sPackageManager 填满！
+            Method getPackageManagerMethod = activityThreadClass.getDeclaredMethod("getPackageManager");
+            getPackageManagerMethod.invoke(null);
+
+            // 现在再去拿，绝对不可能为空了！
             Field sPackageManagerField = activityThreadClass.getDeclaredField("sPackageManager");
             sPackageManagerField.setAccessible(true);
             final Object originalPackageManager = sPackageManagerField.get(null);
 
             if (originalPackageManager == null) {
-                Log.e(TAG, "FATAL ERROR: originalPackageManager is NULL! Hook aborted.");
+                Log.e(TAG, "FATAL ERROR: originalPackageManager is STILL NULL! Hook aborted.");
                 return;
             }
             Log.i(TAG, "Step 2: sPackageManager found: " + originalPackageManager.getClass().getName());
 
-            // 3. 动态代理
+            // 3. 动态代理（伪装检查）
             Log.i(TAG, "Step 3: Creating Proxy...");
             Class<?> iPackageManagerInterface = Class.forName("android.content.pm.IPackageManager");
             Object proxy = Proxy.newProxyInstance(
@@ -67,12 +73,12 @@ public class SystemFeatureHook {
                                         "com.google.android.apps.photos.PIXEL_2019_PRELOAD"
                                 );
                                 if (featuresToEnable.contains(featureName)) {
-                                    Log.d(TAG, "Intercepted TRUE for feature: " + featureName);
+                                    Log.i(TAG, "★★★ BINGO! Intercepted TRUE for feature: " + featureName);
                                     return true;
                                 }
                                 
                                 if (featureName != null && featureName.startsWith("com.google.android.feature.PIXEL_202")) {
-                                    Log.d(TAG, "Intercepted FALSE for feature: " + featureName);
+                                    Log.i(TAG, "★★★ BINGO! Intercepted FALSE for feature: " + featureName);
                                     return false;
                                 }
                             }
