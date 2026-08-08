@@ -1,0 +1,6 @@
+id=zygisk_sargo_spoofer
+name=Zygisk - Sargo Spoofer
+version=v1.0.0
+versionCode=1
+author=Dingdang & Lighty Jiang
+description=Spoofs Google Photos device fingerprint to Pixel 3a (sargo) to unlock legacy backup perks.

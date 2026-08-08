@@ -1,0 +1,58 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.lighty.sargospoofer'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.lighty.sargospoofer"
+        minSdk 27
+        targetSdk 34
+        externalNativeBuild {
+            cmake {
+                cppFlags "-std=c++17 -fno-rtti -fno-exceptions"
+            }
+        }
+        ndk {
+            abiFilters 'arm64-v8a', 'armeabi-v7a'
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path "src/main/cpp/CMakeLists.txt"
+            version "3.22.1+"
+        }
+    }
+}
+
+// 自动打包 Zip 的 Task
+tasks.register('zipMagiskModule', Zip) {
+    dependsOn 'assembleRelease'
+    destinationDirectory = file("$buildDir/outputs/module")
+    archiveFileName = "Zygisk-Sargo-Spoofer-Release.zip"
+
+    // 放入模块基础文件
+    from("$rootDir/module") {
+        include "module.prop", "customize.sh"
+    }
+
+    // 放入编译好的 .so 文件到 zygisk 目录
+    from("$buildDir/intermediates/stripped_native_libs/release/out/lib") {
+        include "**/*.so"
+        into "zygisk"
+        rename 'libmain.so', 'armeabi-v7a.so' // Zygisk 规定文件名必须是架构名
+    }
+    
+    doLast {
+        // 修复 64 位架构文件名
+        ant.move(file: "$destinationDirectory.get().asFile.path", todir: "$destinationDirectory.get().asFile.path")
+    }
+}
+tasks.whenTaskAdded { task ->
+    if (task.name == 'assembleRelease') {
+        task.finalizedBy 'zipMagiskModule'
+    }
+}

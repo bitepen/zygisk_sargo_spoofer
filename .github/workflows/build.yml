@@ -1,0 +1,37 @@
+name: Build Zygisk Module
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+# 必须赋予写权限，Actions 才能在仓库里创建 Release
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Build with Gradle
+        run: |
+          chmod +x gradlew
+          ./gradlew :app:assembleRelease
+
+      - name: Publish to GitHub Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          # 自动生成一个带流水线编号的标签，比如 build-1, build-2
+          tag_name: build-${{ github.run_number }}
+          name: Dev Build ${{ github.run_number }}
+          body: "Zygisk-Sargo-Spoofer 基础 C++ 注入版本自动构建产物。"
+          files: app/build/outputs/module/Zygisk-Sargo-Spoofer-Release.zip
