@@ -29,9 +29,10 @@ android {
 }
 
 // 自动打包 Zip 的 Task
+// 替换 app/build.gradle 底部的这整个 Zip 任务
 tasks.register('zipMagiskModule', Zip) {
     dependsOn 'assembleRelease'
-    destinationDirectory = file("$buildDir/outputs/module")
+    destinationDirectory = layout.buildDirectory.dir("outputs/module")
     archiveFileName = "Zygisk-Sargo-Spoofer-Release.zip"
 
     // 放入模块基础文件
@@ -40,17 +41,21 @@ tasks.register('zipMagiskModule', Zip) {
     }
 
     // 放入编译好的 .so 文件到 zygisk 目录
-    from("$buildDir/intermediates/stripped_native_libs/release/out/lib") {
+    from(layout.buildDirectory.dir("intermediates/stripped_native_libs/release/out/lib")) {
         include "**/*.so"
         into "zygisk"
-        rename 'libmain.so', 'armeabi-v7a.so' // Zygisk 规定文件名必须是架构名
-    }
-    
-    doLast {
-        // 修复 64 位架构文件名
-        ant.move(file: "$destinationDirectory.get().asFile.path", todir: "$destinationDirectory.get().asFile.path")
+        // Zygisk 规定文件名必须是架构名
+        rename { String fileName ->
+            if (fileName == 'libmain.so') {
+                // 根据所在的父文件夹(架构名)来重命名
+                def path = it.relativePath.parent.name
+                return "${path}.so"
+            }
+            return fileName
+        }
     }
 }
+
 tasks.whenTaskAdded { task ->
     if (task.name == 'assembleRelease') {
         task.finalizedBy 'zipMagiskModule'
