@@ -10,17 +10,18 @@ import java.util.List;
 public class SystemFeatureHook {
     public static void init() {
         try {
-            // 1. 解除 Android 隐藏 API 限制
-            try {
-                Method getRuntime = Class.forName("dalvik.system.VMRuntime").getDeclaredMethod("getRuntime");
-                Object vmRuntime = getRuntime.invoke(null);
-                Method setHiddenApiExemptions = vmRuntime.getClass().getDeclaredMethod("setHiddenApiExemptions", String[].class);
-                setHiddenApiExemptions.invoke(vmRuntime, new Object[]{new String[]{"L"}});
-            } catch (Throwable t) {
-                // Ignore
-            }
+            // 1. Android 15/16 必须使用的“元反射”解禁隐藏 API
+            Method forName = Class.class.getDeclaredMethod("forName", String.class);
+            Method getDeclaredMethod = Class.class.getDeclaredMethod("getDeclaredMethod", String.class, Class[].class);
 
-            // 2. 拿到系统的 PackageManager 核心
+            Class<?> vmRuntimeClass = (Class<?>) forName.invoke(null, "dalvik.system.VMRuntime");
+            Method getRuntime = (Method) getDeclaredMethod.invoke(vmRuntimeClass, "getRuntime", null);
+            Object vmRuntime = getRuntime.invoke(null);
+
+            Method setHiddenApiExemptions = (Method) getDeclaredMethod.invoke(vmRuntimeClass, "setHiddenApiExemptions", new Class[]{String[].class});
+            setHiddenApiExemptions.invoke(vmRuntime, new Object[]{new String[]{"L"}});
+
+            // 2. 拦截核心：掉包 sPackageManager
             Class<?> activityThreadClass = Class.forName("android.app.ActivityThread");
             Field sPackageManagerField = activityThreadClass.getDeclaredField("sPackageManager");
             sPackageManagerField.setAccessible(true);
@@ -28,7 +29,6 @@ public class SystemFeatureHook {
 
             if (originalPackageManager == null) return;
 
-            // 3. 制作一个假的 PackageManager (动态代理)
             Class<?> iPackageManagerInterface = Class.forName("android.content.pm.IPackageManager");
             Object proxy = Proxy.newProxyInstance(
                     iPackageManagerInterface.getClassLoader(),
@@ -36,11 +36,10 @@ public class SystemFeatureHook {
                     new InvocationHandler() {
                         @Override
                         public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
-                            // 只要相册敢问 hasSystemFeature，我们就截胡
-                            if ("hasSystemFeature".equals(method.getName()) && args != null && args.length > 0) {
+                            // IPackageManager.hasSystemFeature 实际上是 hasSystemFeature(String name, int version)
+                            if ("hasSystemFeature".equals(method.getName()) && args != null && args.length >= 1) {
                                 String featureName = (String) args[0];
                                 
-                                // 强制放行 Pixel 3a 时代的福利标志
                                 List<String> featuresToEnable = Arrays.asList(
                                         "com.google.android.apps.photos.NEXUS_PRELOAD",
                                         "com.google.android.apps.photos.nexus_preload",
@@ -56,24 +55,22 @@ public class SystemFeatureHook {
                                         "com.google.android.apps.photos.PIXEL_2019_PRELOAD"
                                 );
                                 if (featuresToEnable.contains(featureName)) {
-                                    return true;
+                                    return true; // 强行放行
                                 }
                                 
-                                // 强制屏蔽 2020 年以后的新特性，防穿帮
                                 if (featureName != null && featureName.startsWith("com.google.android.feature.PIXEL_202")) {
-                                    return false;
+                                    return false; // 强行屏蔽
                                 }
                             }
-                            // 其他无关紧要的盘问，交给原版系统处理
                             return method.invoke(originalPackageManager, args);
                         }
                     }
             );
 
-            // 4. 把假的代理掉包换进系统
+            // 3. 把代理换回系统
             sPackageManagerField.set(null, proxy);
         } catch (Throwable e) {
-            // 静默失败，绝对不影响相册运行
+            // 失败时静默
         }
     }
 }
