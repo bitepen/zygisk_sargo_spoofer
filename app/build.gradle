@@ -28,31 +28,27 @@ android {
     }
 }
 
-// 自动打包 Zip 的 Task
-// 替换 app/build.gradle 底部的这整个 Zip 任务
+// 替换 app/build.gradle 底部的 Zip 任务
 tasks.register('zipMagiskModule', Zip) {
     dependsOn 'assembleRelease'
     destinationDirectory = layout.buildDirectory.dir("outputs/module")
     archiveFileName = "Zygisk-Sargo-Spoofer-Release.zip"
 
-    // 放入模块基础文件
+    // 1. 放入模块基础文件
     from("$rootDir/module") {
         include "module.prop", "customize.sh"
     }
 
-    // 放入编译好的 .so 文件到 zygisk 目录
+    // 2. 放入编译好的 .so 文件
     from(layout.buildDirectory.dir("intermediates/stripped_native_libs/release/out/lib")) {
         include "**/*.so"
-        into "zygisk"
-        // Zygisk 规定文件名必须是架构名
-        rename { String fileName ->
-            if (fileName == 'libmain.so') {
-                // 根据所在的父文件夹(架构名)来重命名
-                def path = it.relativePath.parent.name
-                return "${path}.so"
-            }
-            return fileName
+        eachFile { FileCopyDetails fcp ->
+            // fcp.file.parentFile.name 会精准抓取当前的架构名（如 arm64-v8a）
+            def abi = fcp.file.parentFile.name
+            // 重新定义它在 Zip 里的绝对路径，直接放进 zygisk 目录并改名
+            fcp.path = "zygisk/${abi}.so"
         }
+        includeEmptyDirs = false
     }
 }
 
