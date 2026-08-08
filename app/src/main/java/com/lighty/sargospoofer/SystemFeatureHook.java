@@ -3,6 +3,7 @@ package com.lighty.sargospoofer;
 import android.util.Log;
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.util.Arrays;
@@ -31,11 +32,10 @@ public class SystemFeatureHook {
             Log.i(TAG, "Step 2: Fetching sPackageManager...");
             Class<?> activityThreadClass = Class.forName("android.app.ActivityThread");
             
-            // 【终极绝杀核心】：强行踹系统一脚，让它立刻把 sPackageManager 填满！
+            // 强行踹系统一脚，让它立刻把 sPackageManager 填满
             Method getPackageManagerMethod = activityThreadClass.getDeclaredMethod("getPackageManager");
             getPackageManagerMethod.invoke(null);
 
-            // 现在再去拿，绝对不可能为空了！
             Field sPackageManagerField = activityThreadClass.getDeclaredField("sPackageManager");
             sPackageManagerField.setAccessible(true);
             final Object originalPackageManager = sPackageManagerField.get(null);
@@ -82,7 +82,13 @@ public class SystemFeatureHook {
                                     return false;
                                 }
                             }
-                            return method.invoke(originalPackageManager, args);
+                            
+                            // 【关键修复点】：完美剥离异常包装，防止相册闪退！
+                            try {
+                                return method.invoke(originalPackageManager, args);
+                            } catch (InvocationTargetException e) {
+                                throw e.getTargetException(); // 把系统原本的异常原味地扔给相册
+                            }
                         }
                     }
             );
