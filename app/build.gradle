@@ -16,7 +16,8 @@ android {
             }
         }
         ndk {
-            abiFilters 'arm64-v8a', 'armeabi-v7a'
+            // Pixel 10 这种纯 64 位设备，只保留这一个就够了
+            abiFilters 'arm64-v8a'
         }
     }
 
@@ -28,7 +29,6 @@ android {
     }
 }
 
-// 替换 app/build.gradle 底部的 Zip 任务
 tasks.register('zipMagiskModule', Zip) {
     dependsOn 'assembleRelease'
     destinationDirectory = layout.buildDirectory.dir("outputs/module")
@@ -39,16 +39,19 @@ tasks.register('zipMagiskModule', Zip) {
         include "module.prop", "customize.sh"
     }
 
-    // 2. 放入编译好的 .so 文件
+    // 2. 放入 C++ 编译的 .so，并展平路径
     from(layout.buildDirectory.dir("intermediates/stripped_native_libs/release/out/lib")) {
         include "**/*.so"
         eachFile { FileCopyDetails fcp ->
-            // fcp.file.parentFile.name 会精准抓取当前的架构名（如 arm64-v8a）
             def abi = fcp.file.parentFile.name
-            // 重新定义它在 Zip 里的绝对路径，直接放进 zygisk 目录并改名
             fcp.path = "zygisk/${abi}.so"
         }
         includeEmptyDirs = false
+    }
+
+    // 3. 把 Java 编译出来的 classes.dex 抽出来，塞进安装包
+    from(zipTree(layout.buildDirectory.file("outputs/apk/release/app-release-unsigned.apk"))) {
+        include "classes.dex"
     }
 }
 
