@@ -1,5 +1,5 @@
 #include <jni.h>
-#include <string_view>
+#include <string.h>
 #include <android/log.h>
 #include <sys/stat.h>
 #include <fcntl.h>
@@ -8,7 +8,9 @@
 #include "zygisk.hpp"
 
 #define LOG_TAG "SargoSpoofer"
-#define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
+// 强行提升日志级别到 INFO 和 ERROR，击穿安卓 16 的屏蔽！
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
 using zygisk::Api;
 using zygisk::AppSpecializeArgs;
@@ -26,27 +28,34 @@ public:
 
         const char *process = env->GetStringUTFChars(args->nice_name, nullptr);
         if (process) {
-            if (std::string_view(process) == "com.google.android.apps.photos") {
+            // 使用更底层的 strcmp 比较包名，防漏判
+            if (strcmp(process, "com.google.android.apps.photos") == 0) {
                 is_target = true;
             }
             env->ReleaseStringUTFChars(args->nice_name, process);
         }
 
         if (is_target) {
-            // Zygote 阶段：打开咱们的 classes.dex 并保护文件句柄
+            LOGI("PreAppSpecialize: Photos detected! Trying to open classes.dex...");
             int dirfd = api->getModuleDir();
             if (dirfd >= 0) {
                 dex_fd = openat(dirfd, "classes.dex", O_RDONLY);
                 if (dex_fd >= 0) {
                     struct stat sb;
-                    if (fstat(dex_fd, &sb) == 0) {
+                    if (fstat(dex_fd, &sb) == 0 && sb.st_size > 0) {
                         dex_size = sb.st_size;
-                        api->exemptFd(dex_fd); // 告诉系统别关这个文件
+                        api->exemptFd(dex_fd); 
+                        LOGI("PreAppSpecialize: classes.dex opened! Size: %zu bytes", dex_size);
                     } else {
                         close(dex_fd);
                         dex_fd = -1;
+                        LOGE("PreAppSpecialize: classes.dex is empty or corrupted!");
                     }
+                } else {
+                    LOGE("PreAppSpecialize: Could NOT find classes.dex! Check the ZIP file structure.");
                 }
+            } else {
+                LOGE("PreAppSpecialize: Failed to get module directory.");
             }
         } else {
             api->setOption(Option::DLCLOSE_MODULE_LIBRARY);
@@ -56,48 +65,51 @@ public:
     void postAppSpecialize(const AppSpecializeArgs *) override {
         if (!is_target) return;
         
-        LOGD("Google Photos detected! Applying Pixel 3a (sargo) properties...");
-        injectBuildProps(); // 第一道门：改名牌
+        LOGI("PostAppSpecialize: Process starting! Applying Build props (Door 1)...");
+        injectBuildProps(); 
         
-        // 第二道门：内存加载 classes.dex 执行拦截
         if (dex_fd >= 0 && dex_size > 0) {
+            LOGI("PostAppSpecialize: Mapping Dex into memory (Door 2)...");
             void *dex_map = mmap(nullptr, dex_size, PROT_READ, MAP_PRIVATE, dex_fd, 0);
             if (dex_map != MAP_FAILED) {
                 jobject byte_buffer = env->NewDirectByteBuffer(dex_map, dex_size);
 
-                // 获取系统类加载器
                 jclass classLoaderClass = env->FindClass("java/lang/ClassLoader");
                 jmethodID getSystemClassLoader = env->GetStaticMethodID(classLoaderClass, "getSystemClassLoader", "()Ljava/lang/ClassLoader;");
                 jobject systemLoader = env->CallStaticObjectMethod(classLoaderClass, getSystemClassLoader);
 
-                // 实例化 InMemoryDexClassLoader
                 jclass inMemoryDexClassLoaderClass = env->FindClass("dalvik/system/InMemoryDexClassLoader");
                 jmethodID init = env->GetMethodID(inMemoryDexClassLoaderClass, "<init>", "(Ljava/nio/ByteBuffer;Ljava/lang/ClassLoader;)V");
                 jobject dexLoader = env->NewObject(inMemoryDexClassLoaderClass, init, byte_buffer, systemLoader);
 
-                // 加载我们的拦截类
                 jmethodID loadClass = env->GetMethodID(classLoaderClass, "loadClass", "(Ljava/lang/String;)Ljava/lang/Class;");
                 jstring className = env->NewStringUTF("com.lighty.sargospoofer.SystemFeatureHook");
                 jclass hookClass = (jclass) env->CallObjectMethod(dexLoader, loadClass, className);
 
                 if (env->ExceptionCheck()) {
                     env->ExceptionClear();
-                    LOGD("Failed to load hook class!");
+                    LOGE("PostAppSpecialize: FAILED to load Java Hook class!");
                 } else if (hookClass) {
-                    // 调用静态 init 方法
                     jmethodID initHook = env->GetStaticMethodID(hookClass, "init", "()V");
                     if (initHook) {
                         env->CallStaticVoidMethod(hookClass, initHook);
                         if (env->ExceptionCheck()) {
                             env->ExceptionClear();
+                            LOGE("PostAppSpecialize: Java Hook init() threw an exception!");
                         } else {
-                            LOGD("Java Hook successfully injected and executed!");
+                            LOGI("PostAppSpecialize: SUCCESS! Java Hook injected and running!");
                         }
+                    } else {
+                        LOGE("PostAppSpecialize: init() method missing in Java code.");
                     }
                 }
                 env->DeleteLocalRef(className);
+            } else {
+                LOGE("PostAppSpecialize: mmap failed!");
             }
             close(dex_fd);
+        } else {
+            LOGE("PostAppSpecialize: Dex FD invalid, skipping Door 2 (Hook failed).");
         }
     }
 
@@ -129,6 +141,7 @@ private:
         setStaticString(build_class, "FINGERPRINT", "google/sargo/sargo:12/SP2A.220505.002/8353555:user/release-keys");
 
         env->DeleteLocalRef(build_class);
+        LOGI("PostAppSpecialize: Build properties modified successfully.");
     }
 };
 
